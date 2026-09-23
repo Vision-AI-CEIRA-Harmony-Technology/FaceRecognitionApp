@@ -1,0 +1,11 @@
+{
+  "weights_path": "C:\\Users\\lenovo\\Downloads\\app_4 (1)\\app_4\\models\\Glint360K_R100_TopoFR_9760.pt",
+  "backbone": null,
+  "weights_id": "b8730886ae",
+  "dataset_root": "C:\\Users\\lenovo\\Downloads\\app_4 (1)\\app_4\\dataset",
+  "gallery_path": "C:\\Users\\lenovo\\Downloads\\app_4 (1)\\app_4\\assets\\galleries\\b8730886ae__d9e80bcc9d__n2.npz",
+  "face_detector_path": "C:\\Users\\lenovo\\Downloads\\app_4 (1)\\app_4\\models\\face_detection_yunet_2023mar.onnx",
+  "face_detector_score": 0.75,
+  "roi_margin": 0.2,
+  "preprocessing_id": "yunet-v1|C:\\Users\\lenovo\\Downloads\\app_4 (1)\\app_4\\models\\face_detection_yunet_2023mar.onnx|1790096820.003786|0.750|0.200"
+}

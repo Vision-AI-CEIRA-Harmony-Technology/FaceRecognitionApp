@@ -1,0 +1,13 @@
+# Base dependencies. Install PyTorch FIRST if you have an NVIDIA GPU - see README.
+#
+#   NVIDIA:  pip install torch --index-url https://download.pytorch.org/whl/cu124
+#   then:    pip install -r requirements.txt
+#
+# Installing this file on its own gives you the CPU-only torch wheel from PyPI,
+# which works but can never use a GPU.
+
+streamlit>=1.36,<2
+numpy>=1.26
+opencv-python>=4.9
+torch>=2.2
+insightface

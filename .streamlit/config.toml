@@ -1,0 +1,8 @@
+[server]
+# Streamlit defaults to 200 MB, which is smaller than a typical dataset archive.
+# Uploads are buffered in memory, so for very large datasets prefer pointing the
+# setup screen at the folder directly instead of uploading a zip.
+maxUploadSize = 5000
+
+[browser]
+gatherUsageStats = false
