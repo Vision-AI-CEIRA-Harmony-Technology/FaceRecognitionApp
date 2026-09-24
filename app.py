@@ -217,8 +217,15 @@ section[data-testid="stFileUploader"] button:hover { background: var(--purple-lo
     overflow: hidden;
     border: 1px solid var(--line);
     background: var(--surface);
+    margin-left: auto;
+    margin-right: auto;
 }
-.stImage img { border-radius: var(--r) !important; }
+.stImage img {
+    border-radius: var(--r) !important;
+    display: block;
+    margin-left: auto;
+    margin-right: auto;
+}
 
 /* ── Progress bar ── */
 .stProgress > div {
@@ -357,6 +364,7 @@ div[data-testid="stAlert"] {
 /* Top-5 cards */
 .top5-card {
     text-align: center;
+    min-height: 220px;
     padding: .75rem .5rem;
     border: 1px solid var(--line);
     border-radius: var(--r);
@@ -375,6 +383,52 @@ div[data-testid="stAlert"] {
 }
 .top5-score { font-family: var(--font-mono); font-size: .9rem; font-weight: 600; color: var(--purple); }
 .top5-name { font-size: .75rem; color: var(--txt-3); margin-top: 4px; }
+
+.face-result-row {
+    padding: 1rem 0 1.25rem 0;
+    margin: .25rem 0 1rem 0;
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+}
+.face-result-label {
+    font-family: var(--font-head);
+    font-size: .75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    color: var(--txt-3);
+    margin: .5rem 0 .75rem 0;
+}
+.candidate-meta {
+    min-height: 92px;
+    padding: .55rem .4rem;
+    border: 1px solid var(--line);
+    border-top: none;
+    border-radius: 0 0 var(--r) var(--r);
+    background: var(--card);
+    text-align: center;
+}
+.candidate-meta .candidate-rank {
+    color: var(--orange);
+    font-size: .7rem;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    margin-top: .5rem;
+}
+.candidate-meta .candidate-score {
+    color: var(--purple);
+    font-family: var(--font-mono);
+    font-size: .9rem;
+    font-weight: 600;
+    margin-top: .2rem;
+}
+.candidate-meta .candidate-name {
+    color: var(--txt-3);
+    font-size: .78rem;
+    margin-top: .25rem;
+    overflow-wrap: anywhere;
+}
 
 /* Sidebar footer */
 .sidebar-footer {
@@ -514,6 +568,20 @@ def guarded_embed(embedder, arr):
         st.stop()
 
 
+def guarded_embed_batch(embedder, arrays):
+    """Embed all detected probe faces as one batch."""
+    try:
+        return embedder.embed_batch(arrays)
+    except Exception as exc:
+        st.error(
+            f"Inference failed on **{embedder.device.upper()}**: "
+            f"`{type(exc).__name__}`. If this is the GPU, it may be out of memory "
+            "or the driver may have reset - switch to **CPU** in the sidebar and retry."
+        )
+        st.caption(str(exc)[:300])
+        st.stop()
+
+
 def guarded_align(bgr, ctx_id=0):
     """Detect + align, turning a missing face or detector failure into a
     readable message instead of a stack trace or a silently mis-aligned crop."""
@@ -522,6 +590,19 @@ def guarded_align(bgr, ctx_id=0):
         return aligned
     except P.NoFaceDetected:
         st.error("No face detected in that image - try a clearer, front-facing photo.")
+        st.stop()
+    except Exception as exc:
+        st.error(f"Face detection failed: `{type(exc).__name__}`: {exc}")
+        st.caption(str(exc)[:300])
+        st.stop()
+
+
+def guarded_align_all(bgr, ctx_id=0):
+    """Detect and align every face in a probe image."""
+    try:
+        return P.detect_and_align_all(bgr, ctx_id=ctx_id)
+    except P.NoFaceDetected:
+        st.error("No face detected in that image - try a clearer group photo.")
         st.stop()
     except Exception as exc:
         st.error(f"Face detection failed: `{type(exc).__name__}`: {exc}")
@@ -1013,70 +1094,79 @@ with tab_1n:
         img_p = read_upload(up_p)
         ctx_id = 0 if device == "gpu" else -1
 
-        aligned_p, t_det = P.timed(lambda: guarded_align(img_p, ctx_id))
-        arr_p, t_pre = P.timed(lambda: P.to_tensor(aligned_p))
-        emb_p, t_emb = P.timed(lambda: guarded_embed(embedder, arr_p), sync)
-        npb, t_norm = P.timed(lambda: P.normalize(emb_p))
-        search_result, t_cmp = P.timed(lambda: P.search(gallery, npb))
-        _template_sims, identity_sims, identity_names, best_templates_by_identity = search_result
-        top, t_dec = P.timed(lambda: np.argsort(-identity_sims)[:5])
-        scores = identity_sims[top]
-        top_names = identity_names[top]
-        best_templates = best_templates_by_identity[top]
+        detected, t_det = P.timed(lambda: guarded_align_all(img_p, ctx_id))
+        aligned_faces = [aligned for aligned, _bbox, _kps in detected]
+        arrs, t_pre = P.timed(lambda: [P.to_tensor(aligned) for aligned in aligned_faces])
+        embeddings, t_emb = P.timed(
+            lambda: guarded_embed_batch(embedder, arrs), sync)
+        normalized, t_norm = P.timed(lambda: P.normalize(embeddings))
+        searches, t_cmp = P.timed(
+            lambda: [P.search(gallery, probe[None, :]) for probe in normalized])
+        ranked, t_dec = P.timed(
+            lambda: [np.argsort(-result[1])[:5] for result in searches])
 
-        accepted = scores[0] >= threshold
+        face_results = sorted(
+            zip(range(len(detected)), searches, ranked),
+            key=lambda item: float(item[1][1][item[2][0]]),
+            reverse=True,
+        )
 
-        left, mid, right = st.columns([1, 1, 1.15])
+        annotated = img_p.copy()
+        for face_number, (face_index, _face_data, _top) in enumerate(face_results, start=1):
+            _aligned, bbox, _kps = detected[face_index]
+            x1, y1, x2, y2 = np.round(bbox).astype(int)
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), (124, 58, 237), 2)
+            cv2.putText(annotated, str(face_number), (x1, max(y1 - 6, 18)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (124, 58, 237), 2)
 
-        with left:
-            st.markdown('<div class="section-label">Probe</div>', unsafe_allow_html=True)
-            st.image(rgb(img_p), use_container_width=True)
-            st.caption("Aligned crop fed to the model")
-            st.image(rgb(aligned_p), width=112)
+        st.markdown(
+            f'<div class="section-label">Detected faces: {len(detected)}</div>',
+            unsafe_allow_html=True,
+        )
+        st.image(rgb(annotated), use_container_width=True)
+        st.caption("Faces are numbered by best-match similarity. Each face is searched independently.")
 
-        with mid:
-            st.markdown('<div class="section-label">Best Match</div>', unsafe_allow_html=True)
-            st.image(gallery_thumb(gallery, best_templates[0]), use_container_width=True)
-            label = (f"identity {top_names[0]}" if accepted
-                     else "No match above threshold")
-            st.markdown(
+        for face_number, (face_index, face_data, top) in enumerate(face_results, start=1):
+            _template_sims, identity_sims, identity_names, best_templates_by_identity = face_data
+            scores = identity_sims[top]
+            best_templates = best_templates_by_identity[top]
+            accepted = scores[0] >= threshold
+
+            st.markdown(f'<div class="face-result-label">Face {face_number} result</div>',
+                        unsafe_allow_html=True)
+            summary_cols = st.columns([1, 2.8])
+            summary_cols[0].image(rgb(aligned_faces[face_index]), width=160)
+            label = f"identity {identity_names[top[0]]}" if accepted else "No match above threshold"
+            summary_cols[1].markdown(
                 f'<div class="verdict {"verdict-yes" if accepted else "verdict-no"}" '
                 f'style="font-size:1.15rem">{label}</div>'
                 f'<span class="score-badge">{scores[0]:.4f}</span>',
                 unsafe_allow_html=True,
             )
+            st.markdown('<div class="face-result-label">Top candidates</div>',
+                        unsafe_allow_html=True)
+            candidate_cols = st.columns(4)
+            for rank, (col, identity_index, score, template_index) in enumerate(
+                    zip(candidate_cols, top[:4], scores[:4], best_templates[:4]), start=1):
+                col.image(gallery_thumb(gallery, template_index), width=160)
+                col.markdown(
+                    f'<div class="candidate-meta">'
+                    f'<div class="candidate-rank">{rank}. candidate</div>'
+                    f'<div class="candidate-score">{score:.4f}</div>'
+                    f'<div class="candidate-name">id {identity_names[identity_index]}</div>'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
 
-        with right:
-            st.markdown(
-                f'<div class="section-label">Latency - {device_labels.get(device, device)}</div>',
-                unsafe_allow_html=True,
-            )
-            total = t_det + t_pre + t_emb + t_norm + t_cmp + t_dec
-            latency_table([
-                ("Detect + align probe", t_det, "RetinaFace, 5-pt affine -> 112x112"),
-                ("Preprocess probe", t_pre, "resize, RGB, [-1,1]"),
-                ("Embed probe", t_emb, ""),
-                ("Normalise probe", t_norm, "L2 unit vector"),
-                ("Search gallery", t_cmp, f"1 x {n_templates:,} cosine"),
-                ("Rank / decide", t_dec, "top-5 argsort"),
-                ("Embed gallery", None, f"{n_templates:,} templates, done at enrollment"),
-            ], total)
-
-        stripe_rule()
-        st.markdown('<div class="section-label">Top 5</div>', unsafe_allow_html=True)
-
-        cols = st.columns(5)
-        for idx, (col, identity_index, s, template_index) in enumerate(
-                zip(cols, top, scores, best_templates)):
-            rank_label = ["1st", "2nd", "3rd", "4th", "5th"][idx]
-            col.image(gallery_thumb(gallery, template_index), use_container_width=True)
-            col.markdown(
-                f'<div class="top5-card">'
-                f'<div class="top5-rank">{rank_label}</div>'
-                f'<div class="top5-score">{s:.4f}</div>'
-                f'<div class="top5-name">id {identity_names[identity_index]}</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
+        total = t_det + t_pre + t_emb + t_norm + t_cmp + t_dec
+        latency_table([
+            ("Detect + align probe", t_det, f"{len(detected)} faces"),
+            ("Preprocess probes", t_pre, f"{len(detected)} crops"),
+            ("Embed probes", t_emb, f"batch {len(detected)}"),
+            ("Normalise probes", t_norm, "L2 unit vectors"),
+            ("Search gallery", t_cmp, f"{len(detected)} x {n_templates:,} cosine"),
+            ("Rank / decide", t_dec, f"{len(detected)} top-5 rankings"),
+            ("Embed gallery", None, f"{n_templates:,} templates, done at enrollment"),
+        ], total)
     else:
         st.info("Waiting for a probe image.")

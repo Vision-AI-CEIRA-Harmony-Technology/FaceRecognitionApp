@@ -74,6 +74,29 @@ def detect_and_align(bgr, image_size=112, det_thresh=0.5, ctx_id=0):
     return aligned, face.bbox, face.kps
 
 
+def detect_and_align_all(bgr, image_size=112, det_thresh=0.5, ctx_id=0):
+    """Detect and align every face, ordered from largest to smallest."""
+    from insightface.utils import face_align
+
+    det = get_detector(ctx_id=ctx_id)
+    det.det_thresh = det_thresh
+    faces = det.get(bgr)
+    if not faces:
+        raise NoFaceDetected("no face found above the detection threshold")
+
+    faces = sorted(
+        faces,
+        key=lambda face: (face.bbox[2] - face.bbox[0]) *
+                         (face.bbox[3] - face.bbox[1]),
+        reverse=True,
+    )
+    return [
+        (face_align.norm_crop(bgr, landmark=face.kps, image_size=image_size),
+         face.bbox, face.kps)
+        for face in faces
+    ]
+
+
 # --------------------------------------------------------------- preprocessing
 
 def to_tensor(bgr):
