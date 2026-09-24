@@ -641,9 +641,10 @@ def setup_screen(settings, devices):
     # ---------------------------------------------------------------- dataset
     step_head(2, "Dataset")
     st.markdown(
-        '<p class="sub">One folder per identity, each containing a '
-        '<code>reference</code> and a <code>match</code> image. A <code>.zip</code> '
-        'of that folder works too.</p>',
+        '<p class="sub">One folder per identity, containing one or more '
+        '<code>reference_*.jpg</code> templates and optional '
+        '<code>match_*.jpg</code> probes. A <code>references/</code> and '
+        '<code>matches/</code> sub-folder layout is also supported.</p>',
         unsafe_allow_html=True,
     )
 
@@ -865,7 +866,8 @@ with st.sidebar:
         f'<span class="model-name">TopoFR-{(meta.get("backbone") or "?").upper()}</span><br>'
         f'{meta.get("weights_name", "?")}<br>'
         f'512-d &middot; PyTorch<br>'
-        f'Gallery: <code>{len(gallery["names"]):,}</code> identities, pre-embedded'
+        f'Gallery: <code>{meta.get("n_identities", len(set(gallery["names"]))):,}</code> identities, '
+        f'<code>{meta.get("n_templates", len(gallery["names"])):,}</code> templates'
         f'</div>',
         unsafe_allow_html=True,
     )
@@ -997,12 +999,12 @@ with tab_11:
 # ─────────────────────────────────────────────────────────────────────────────
 
 with tab_1n:
-    G = gallery["emb"]
-    n_gal = len(gallery["names"])
+    n_gal = gallery["meta"].get("n_identities", len(set(gallery["names"])))
+    n_templates = gallery["meta"].get("n_templates", len(gallery["names"]))
     st.markdown(
         f"Drop one image. It is embedded and matched against **{n_gal:,} enrolled "
-        "identities**. The gallery was embedded and normalised at enrollment, so "
-        "only the probe's cost is timed."
+        f"identities** using **{n_templates:,} reference templates**. The gallery "
+        "was embedded and normalised at enrollment, so only the probe's cost is timed."
     )
 
     up_p = st.file_uploader("Probe image", type=["jpg", "jpeg", "png", "bmp"], key="p")
@@ -1015,10 +1017,13 @@ with tab_1n:
         arr_p, t_pre = P.timed(lambda: P.to_tensor(aligned_p))
         emb_p, t_emb = P.timed(lambda: guarded_embed(embedder, arr_p), sync)
         npb, t_norm = P.timed(lambda: P.normalize(emb_p))
-        sims, t_cmp = P.timed(lambda: (npb @ G.T).ravel())
-        top, t_dec = P.timed(lambda: np.argsort(-sims)[:5])
+        search_result, t_cmp = P.timed(lambda: P.search(gallery, npb))
+        _template_sims, identity_sims, identity_names, best_templates_by_identity = search_result
+        top, t_dec = P.timed(lambda: np.argsort(-identity_sims)[:5])
+        scores = identity_sims[top]
+        top_names = identity_names[top]
+        best_templates = best_templates_by_identity[top]
 
-        scores = sims[top]
         accepted = scores[0] >= threshold
 
         left, mid, right = st.columns([1, 1, 1.15])
@@ -1031,8 +1036,8 @@ with tab_1n:
 
         with mid:
             st.markdown('<div class="section-label">Best Match</div>', unsafe_allow_html=True)
-            st.image(gallery_thumb(gallery, top[0]), use_container_width=True)
-            label = (f"identity {gallery['names'][top[0]]}" if accepted
+            st.image(gallery_thumb(gallery, best_templates[0]), use_container_width=True)
+            label = (f"identity {top_names[0]}" if accepted
                      else "No match above threshold")
             st.markdown(
                 f'<div class="verdict {"verdict-yes" if accepted else "verdict-no"}" '
@@ -1052,23 +1057,24 @@ with tab_1n:
                 ("Preprocess probe", t_pre, "resize, RGB, [-1,1]"),
                 ("Embed probe", t_emb, ""),
                 ("Normalise probe", t_norm, "L2 unit vector"),
-                ("Search gallery", t_cmp, f"1 x {n_gal:,} cosine"),
+                ("Search gallery", t_cmp, f"1 x {n_templates:,} cosine"),
                 ("Rank / decide", t_dec, "top-5 argsort"),
-                ("Embed gallery", None, f"{n_gal:,} identities, done at enrollment"),
+                ("Embed gallery", None, f"{n_templates:,} templates, done at enrollment"),
             ], total)
 
         stripe_rule()
         st.markdown('<div class="section-label">Top 5</div>', unsafe_allow_html=True)
 
         cols = st.columns(5)
-        for idx, (col, i, s) in enumerate(zip(cols, top, scores)):
+        for idx, (col, identity_index, s, template_index) in enumerate(
+                zip(cols, top, scores, best_templates)):
             rank_label = ["1st", "2nd", "3rd", "4th", "5th"][idx]
-            col.image(gallery_thumb(gallery, i), use_container_width=True)
+            col.image(gallery_thumb(gallery, template_index), use_container_width=True)
             col.markdown(
                 f'<div class="top5-card">'
                 f'<div class="top5-rank">{rank_label}</div>'
                 f'<div class="top5-score">{s:.4f}</div>'
-                f'<div class="top5-name">id {gallery["names"][i]}</div>'
+                f'<div class="top5-name">id {identity_names[identity_index]}</div>'
                 f'</div>',
                 unsafe_allow_html=True,
             )

@@ -63,7 +63,7 @@ def bench_verification(embedder, pairs, trials, threshold):
     return stats
 
 
-def bench_identification(embedder, probes, G, trials):
+def bench_identification(embedder, probes, gallery, trials):
     sync = embedder.sync
     steps = {k: [] for k in ["preprocess_probe", "embed_probe", "normalize",
                              "search", "rank"]}
@@ -75,8 +75,9 @@ def bench_identification(embedder, probes, G, trials):
         a, t_p = P.timed(lambda: P.to_tensor(img))
         e, t_e = P.timed(lambda: embedder.embed(a), sync)
         n, t_n = P.timed(lambda: P.normalize(e))
-        sims, t_s = P.timed(lambda: (n @ G.T).ravel())
-        _, t_r = P.timed(lambda: np.argsort(-sims)[:5])
+        search_result, t_s = P.timed(lambda: P.search(gallery, n))
+        identity_sims = search_result[1]
+        _, t_r = P.timed(lambda: np.argsort(-identity_sims)[:5])
         vals = [t_p, t_e, t_n, t_s, t_r]
         for k, v in zip(steps, vals):
             steps[k].append(v)
@@ -106,27 +107,29 @@ def main():
     gallery = P.load_gallery(args.gallery)
     if gallery is None:
         raise SystemExit(f"no gallery at {args.gallery} - run enroll.py first")
-    G = gallery["emb"]
-    n_gal = len(gallery["names"])
+    n_gal = gallery["meta"].get("n_identities", len(set(gallery["names"])))
 
     # Same seed as the notebook, so the trial set is reproducible across machines.
     rng = np.random.default_rng(42)
     scan = D.scan(args.dataset)
     by_name = {i.name: i for i in scan["identities"]}
-    picked = rng.permutation(gallery["names"])
+    picked = rng.permutation(np.unique(gallery["names"]))
 
     pairs, probes = [], []
     for name in picked:
         ident = by_name.get(str(name))
-        if ident and ident.match:
-            pairs.append((ident.reference, ident.match))
-            probes.append(ident.match)
+        if ident and ident.matches:
+            for match in ident.matches:
+                pairs.append((ident.reference, match))
+                probes.append(match)
+                if len(pairs) >= args.trials:
+                    break
         if len(pairs) >= args.trials:
             break
     if not pairs:
         raise SystemExit(
-            "no reference/match pairs found in the dataset - 1:1 needs two images "
-            "per identity.")
+            "no reference/match pairs found in the dataset - 1:1 needs reference "
+            "and match images.")
 
     print(f"{os.path.basename(args.weights)} / PyTorch - {len(pairs)} trials, "
           f"gallery {n_gal:,}")
@@ -138,7 +141,7 @@ def main():
 
         results[dev] = {
             "1:1": bench_verification(embedder, pairs, args.trials, args.threshold),
-            "1:N": bench_identification(embedder, probes, G, args.trials),
+            "1:N": bench_identification(embedder, probes, gallery, args.trials),
         }
         report("1:1 verification", results[dev]["1:1"])
         report(f"1:N identification (gallery {n_gal:,}, pre-embedded)",

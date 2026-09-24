@@ -1,10 +1,15 @@
 """Finding identities in whatever folder the user points at.
 
-Expected layout - one sub-folder per identity, two images inside:
+Expected layout - one sub-folder per identity, with one or more reference
+images and optional probe/match images:
 
     <root>/
-        <identity>/reference.jpg     enrolled into the 1:N gallery
-        <identity>/match.jpg         used as the probe / as the 1:1 pair
+        <identity>/reference_frontal.jpg  enrolled into the 1:N gallery
+        <identity>/reference_left30.jpg   enrolled into the 1:N gallery
+        <identity>/match_01.jpg           used as a probe
+
+The same files may be placed in `<identity>/references/` and
+`<identity>/matches/` sub-folders.
 
 A `.zip` of that folder is accepted too and extracted next to the app. If the
 archive wraps everything in a single top-level directory, we descend into it, so
@@ -23,12 +28,22 @@ from config import IMAGE_EXTS
 
 
 class Identity:
-    __slots__ = ("name", "reference", "match")
+    __slots__ = ("name", "references", "matches")
 
-    def __init__(self, name, reference, match):
+    def __init__(self, name, references, matches):
         self.name = name
-        self.reference = reference
-        self.match = match
+        self.references = references
+        self.matches = matches
+
+    @property
+    def reference(self):
+        """Backward-compatible access to the first reference image."""
+        return self.references[0] if self.references else None
+
+    @property
+    def match(self):
+        """Backward-compatible access to the first match image."""
+        return self.matches[0] if self.matches else None
 
 
 def _natural(name):
@@ -45,11 +60,33 @@ def _images(folder):
 
 
 def _named(folder, stem):
-    """First image called `<stem>.<ext>` in this folder."""
-    for f in _images(folder):
-        if os.path.splitext(f)[0].lower() == stem:
-            return os.path.join(folder, f)
-    return None
+    """Images whose filename is `<stem>` or starts with `<stem>_`."""
+    prefix = stem.lower() + "_"
+    return [
+        os.path.join(folder, f)
+        for f in _images(folder)
+        if (os.path.splitext(f)[0].lower() == stem.lower()
+            or os.path.splitext(f)[0].lower().startswith(prefix))
+    ]
+
+
+def _identity_images(folder):
+    """Return reference and match images from flat or split-folder layouts."""
+    references_dir = os.path.join(folder, "references")
+    matches_dir = os.path.join(folder, "matches")
+    if os.path.isdir(references_dir) or os.path.isdir(matches_dir):
+        references = [os.path.join(references_dir, f)
+                      for f in _images(references_dir)]
+        matches = [os.path.join(matches_dir, f)
+                   for f in _images(matches_dir)]
+        return references, matches
+
+    images = [os.path.join(folder, f) for f in _images(folder)]
+    references = _named(folder, "reference")
+    matches = _named(folder, "match")
+    if references or matches:
+        return references, matches
+    return images[:1], images[1:]
 
 
 def _subdirs(root):
@@ -83,7 +120,16 @@ def resolve_root(root):
 
 def dataset_id(root):
     """Short stable id for a dataset location, used in the gallery filename."""
-    key = os.path.normcase(os.path.abspath(root)).encode("utf-8", "replace")
+    root = os.path.abspath(root)
+    files = []
+    for folder, _dirs, names in os.walk(root):
+        for name in sorted(names, key=_natural):
+            path = os.path.join(folder, name)
+            if name.lower().endswith(IMAGE_EXTS):
+                stat = os.stat(path)
+                files.append((os.path.relpath(path, root), stat.st_size,
+                              stat.st_mtime_ns))
+    key = repr((os.path.normcase(root), files)).encode("utf-8", "replace")
     return hashlib.sha1(key).hexdigest()[:10]
 
 
@@ -92,7 +138,7 @@ def scan(root, limit=0):
     root = resolve_root(root)
     result = {
         "root": root, "identities": [], "convention": None,
-        "n_with_match": 0, "skipped": 0, "warnings": [],
+        "n_with_match": 0, "n_references": 0, "skipped": 0, "warnings": [],
     }
     if not os.path.isdir(root):
         result["warnings"].append(f"Not a folder: {root}")
@@ -102,31 +148,26 @@ def scan(root, limit=0):
     if not folders:
         result["warnings"].append(
             "No sub-folders found. Expected one folder per identity, each "
-            "containing a reference and a match image.")
+            "containing one or more reference images.")
         return result
 
     # Decide the convention from a sample rather than per-folder, so a dataset is
     # read one consistent way instead of a mix.
     sample = folders[:50]
-    named = sum(1 for d in sample if _named(os.path.join(root, d), "reference"))
+    named = sum(1 for d in sample
+                if _identity_images(os.path.join(root, d))[0])
     result["convention"] = "reference/match" if named > len(sample) // 2 else "positional"
 
     for name in folders:
         folder = os.path.join(root, name)
-        if result["convention"] == "reference/match":
-            reference = _named(folder, "reference")
-            match = _named(folder, "match")
-        else:
-            imgs = [os.path.join(folder, f) for f in _images(folder)]
-            reference = imgs[0] if imgs else None
-            match = imgs[1] if len(imgs) > 1 else None
+        references, matches = _identity_images(folder)
 
-        if reference is None:
+        if not references:
             result["skipped"] += 1
             continue
-        result["identities"].append(Identity(name, reference, match))
-        if match:
-            result["n_with_match"] += 1
+        result["identities"].append(Identity(name, references, matches))
+        result["n_references"] += len(references)
+        result["n_with_match"] += len(matches)
         if limit and len(result["identities"]) >= limit:
             break
 
@@ -136,8 +177,8 @@ def scan(root, limit=0):
             f"(looked for {', '.join(IMAGE_EXTS)}).")
     elif result["convention"] == "positional":
         result["warnings"].append(
-            "No reference.*/match.* filenames found - falling back to "
-            "alphabetical order: first image enrolled, second used as probe.")
+            "No reference*/match* filenames found - falling back to "
+            "alphabetical order: first image enrolled, remaining images used as probes.")
     if result["identities"] and result["n_with_match"] == 0:
         result["warnings"].append(
             "No match images found. 1:N still works with uploaded probes, but "
@@ -152,8 +193,8 @@ def summary(result):
     n = len(result["identities"])
     if not n:
         return "no identities found"
-    return (f"{n:,} identities - {result['n_with_match']:,} with a match image "
-            f"({result['convention']} layout)")
+    return (f"{n:,} identities - {result['n_references']:,} reference images, "
+            f"{result['n_with_match']:,} match images ({result['convention']} layout)")
 
 
 def extract_zip(zip_path, dest_dir):

@@ -1,5 +1,4 @@
-"""Build the 1:N gallery: detect, align and embed one reference image per
-identity, once.
+"""Build the 1:N gallery: detect, align and embed reference images once.
 
 Everything this costs is enrollment cost. The app never repeats it, which is what
 makes the 1:N latency shown in the demo comparable to the 1:1 latency - a search
@@ -30,6 +29,10 @@ from engine import Embedder, available_devices
 def build(embedder, identities, root, out_path, batch=32, progress=None):
     """Embed every identity's reference image and write the gallery.
 
+    An identity may have multiple reference templates. Each template is stored
+    as a separate gallery row with the same identity name; search aggregates
+    those rows back to one identity-level result.
+
     Each reference is detected + aligned to a 112x112 ArcFace crop before
     embedding, using the same `P.detect_and_align` the app runs on a probe -
     a gallery aligned one way and searched another would silently compare
@@ -43,16 +46,19 @@ def build(embedder, identities, root, out_path, batch=32, progress=None):
     """
     ctx_id = 0 if embedder.device == "gpu" else -1
     embs, names, rels = [], [], []
-    total = len(identities)
+    items = [(ident.name, path)
+             for ident in identities
+             for path in ident.references]
+    total = len(items)
     n_unreadable = 0
     n_no_face = 0
     t0 = perf_counter()
 
     for start in range(0, total, batch):
-        chunk = identities[start:start + batch]
+        chunk = items[start:start + batch]
         arrs, keep = [], []
-        for ident in chunk:
-            img = cv2.imread(ident.reference)
+        for name, path in chunk:
+            img = cv2.imread(path)
             if img is None:                      # unreadable file - skip, do not fail
                 n_unreadable += 1
                 continue
@@ -62,12 +68,12 @@ def build(embedder, identities, root, out_path, batch=32, progress=None):
                 n_no_face += 1                   # no face found - skip, do not fail
                 continue
             arrs.append(P.to_tensor(aligned))
-            keep.append(ident)
+            keep.append((name, path))
         if arrs:
             out = embedder.embed_batch(arrs)
             embs.append(out)
-            names += [i.name for i in keep]
-            rels += [os.path.relpath(i.reference, root) for i in keep]
+            names += [name for name, _path in keep]
+            rels += [os.path.relpath(path, root) for _name, path in keep]
 
         done = min(start + batch, total)
         if progress:
@@ -84,7 +90,8 @@ def build(embedder, identities, root, out_path, batch=32, progress=None):
         "backbone": embedder.backbone,
         "root": os.path.abspath(root),
         "dataset_id": D.dataset_id(root),
-        "n_identities": len(names),
+        "n_identities": len(set(names)),
+        "n_templates": len(names),
         "n_skipped_unreadable": n_unreadable,
         "n_skipped_no_face": n_no_face,
         "built_on": embedder.device,

@@ -15,7 +15,7 @@ from time import perf_counter
 import cv2
 import numpy as np
 
-GALLERY_FORMAT = 2      # bump when the npz layout changes
+GALLERY_FORMAT = 3      # multiple reference templates per identity
 
 
 # --------------------------------------------------------- detection & alignment
@@ -148,9 +148,11 @@ def load_gallery(path):
         meta = json.loads(str(data["meta"]))
     except (KeyError, ValueError):
         meta = {}
+    if meta.get("format") != GALLERY_FORMAT:
+        return None
     return {
         "path": path,
-        "emb": data["emb"].astype(np.float32),      # (N, 512), already normalised
+        "emb": data["emb"].astype(np.float32),      # (templates, 512), normalised
         "names": [str(n) for n in data["names"]],
         "rel_paths": [str(p) for p in data["rel_paths"]],
         "root": meta.get("root", ""),
@@ -190,8 +192,19 @@ def gallery_matches(gallery, weights_id):
     return bool(gallery) and gallery["meta"].get("weights_id") == weights_id
 
 
-def search(gallery_emb, probe_emb, top_k=5):
-    """Cosine scores against every enrolled identity, and the top-k indices."""
-    sims = (probe_emb @ gallery_emb.T).ravel()
-    top = np.argsort(-sims)[:top_k]
-    return sims, top
+def search(gallery_emb, probe_emb):
+    """Search templates and return one best-scoring row per identity.
+
+    Returns template scores, identity-level scores, identity names, and the
+    template row that explains each identity-level result.
+    """
+    template_scores = (probe_emb @ gallery_emb["emb"].T).ravel()
+    names = np.asarray(gallery_emb["names"])
+    unique_names, inverse = np.unique(names, return_inverse=True)
+    identity_scores = np.full(len(unique_names), -np.inf, dtype=np.float32)
+    best_templates = np.full(len(unique_names), -1, dtype=np.int64)
+    for row, identity_index in enumerate(inverse):
+        if template_scores[row] > identity_scores[identity_index]:
+            identity_scores[identity_index] = template_scores[row]
+            best_templates[identity_index] = row
+    return template_scores, identity_scores, unique_names, best_templates
