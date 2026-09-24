@@ -1134,8 +1134,10 @@ with tab_1n:
 
             st.markdown(f'<div class="face-result-label">Face {face_number} result</div>',
                         unsafe_allow_html=True)
-            summary_cols = st.columns([1, 2.8])
-            summary_cols[0].image(rgb(aligned_faces[face_index]), width=160)
+            summary_cols = st.columns([5, 1])
+            summary_cols[0].markdown('<div class="section-label">Best candidate</div>',
+                                     unsafe_allow_html=True)
+            summary_cols[0].image(gallery_thumb(gallery, best_templates[0]), width=500)
             label = f"identity {identity_names[top[0]]}" if accepted else "No match above threshold"
             summary_cols[1].markdown(
                 f'<div class="verdict {"verdict-yes" if accepted else "verdict-no"}" '
